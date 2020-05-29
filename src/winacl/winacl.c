@@ -182,61 +182,6 @@ usage(char *path)
 	exit(0);
 }
 
-/* add inherited flag to ACES in ACL */
-static int
-set_inherited_flag(acl_t *acl)
-{
-        int entry_id;
-        acl_entry_t acl_entry;
-        acl_flagset_t acl_flags;
-                 
-        entry_id = ACL_FIRST_ENTRY;
-        while (acl_get_entry(*acl, entry_id, &acl_entry) > 0) {
-                entry_id = ACL_NEXT_ENTRY;
-
-                if (acl_get_flagset_np(acl_entry, &acl_flags) < 0)
-                        err(EX_OSERR, "acl_get_flagset_np() failed");
-                if ((*acl_flags & ACL_ENTRY_INHERITED) == 0) {
-                    acl_add_flag_np(acl_flags, ACL_ENTRY_INHERITED);
-
-                    if (acl_set_flagset_np(acl_entry, acl_flags) < 0)
-                            err(EX_OSERR, "acl_set_flagset_np() failed");
-                }
-        }
-
-        return (0);
-}
-
-/* only directories can have inherit flags set */
-static int
-remove_inherit_flags(acl_t *acl)
-{
-	int entry_id;
-	acl_entry_t acl_entry;
-	acl_flagset_t acl_flags;
-
-	entry_id = ACL_FIRST_ENTRY;
-	while (acl_get_entry(*acl, entry_id, &acl_entry) > 0) {
-		entry_id = ACL_NEXT_ENTRY;
-
-		if (acl_get_flagset_np(acl_entry, &acl_flags) < 0)
-			err(EX_OSERR, "acl_get_flagset_np() failed");
-		if (*acl_flags & (ACL_ENTRY_FILE_INHERIT|ACL_ENTRY_DIRECTORY_INHERIT|
-				  ACL_ENTRY_NO_PROPAGATE_INHERIT|ACL_ENTRY_INHERIT_ONLY)) {
-			acl_delete_flag_np(acl_flags, (
-				ACL_ENTRY_FILE_INHERIT|ACL_ENTRY_DIRECTORY_INHERIT|
-				ACL_ENTRY_NO_PROPAGATE_INHERIT|ACL_ENTRY_INHERIT_ONLY
-				));
-
-			if (acl_set_flagset_np(acl_entry, acl_flags) < 0)
-				err(EX_OSERR, "acl_set_flagset_np() failed");
-
-		}
-	}
-
-	return (0);
-}
-
 static int
 strip_acl(struct windows_acl_info *w, FTSENT *fts_entry)
 {
@@ -604,36 +549,6 @@ usage_check(struct windows_acl_info *w)
 	}
 }
 
-
-static void
-make_acls(struct windows_acl_info *w)
-{
-	acl_t acl;
-	int i;
-
-	/* set the source ACL for top level directory */
-	if ((w->source_acl = acl_dup(acl)) == NULL) {
-		err(EX_OSERR, "acl_dup() failed");
-	}
-
-	for (i=0; i<MAX_ACL_DEPTH; i++){
-		/* create a directory acl */
-		if ((w->acls[i].dacl = acl_dup(acl)) == NULL) {
-			err(EX_OSERR, "acl_dup() failed");
-		}
-		set_inherited_flag(&w->acls[i].dacl);
-
-		/* create a file acl */
-		if ((w->acls[i].facl = acl_dup(acl)) == NULL) {
-			err(EX_OSERR, "acl_dup() failed");
-		}
-		remove_inherit_flags(&w->acls[i].facl);
-		set_inherited_flag(&w->acls[i].facl);
-	}
-
-	acl_free(acl);
-}
-
 static int
 calculate_inherited_acl(struct windows_acl_info *w, acl_t parent_acl, int level)
 {
@@ -951,9 +866,6 @@ main(int argc, char **argv)
 			free_windows_acl_info(w);
 			return (1);
 		}
-	}
-	else {
-		make_acls(w);
 	}
 
 	usage_check(w);
