@@ -87,45 +87,6 @@ struct {
 size_t actions_size = sizeof(actions) / sizeof(actions[0]);
 
 
-static void
-setarg(char **pptr, const char *src)
-{
-	char *ptr;
-
-	ptr = *pptr;
-	if (ptr != NULL)
-		free(ptr);
-	ptr = strdup(src);
-	if (ptr == NULL)
-		err(EX_OSERR, NULL);
-
-	*pptr = ptr;
-}
-
-
-static void
-copyarg(char **pptr, const char *src)
-{
-	int len;
-	char *ptr;
-
-	if (pptr == NULL)
-		err(EX_USAGE, "NULL destination");
-	if (src == NULL)
-		err(EX_USAGE, "NULL source");
-
-	ptr = *pptr;
-	len = strlen(src);
-	strncpy(ptr, src, len);
-	ptr += len;
-	*ptr = '\n';
-	ptr++;
-	*ptr = 0;
-
-	*pptr = ptr;
-}
-
-
 static int
 get_action(const char *str)
 {
@@ -900,15 +861,15 @@ main(int argc, char **argv)
 			}
 
 			case 'c':
-				setarg(&w->chroot, optarg);
+				w->chroot = realpath(optarg, NULL);
 				break;
 
 			case 's':
-				setarg(&w->source, optarg);
+				w->source = realpath(optarg, NULL);
 				break;
 
 			case 'p':
-				setarg(&w->path, optarg);
+				w->path = realpath(optarg, NULL);
 				break;
 
 			case 'r':
