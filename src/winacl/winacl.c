@@ -50,6 +50,7 @@
 #define	WA_STRIP		0x00000040	/* strip ACL */
 #define	WA_CHOWN		0x00000080	/* only chown */
 #define	WA_TRIAL		0x00000100	/* trial run */
+#define	WA_RESTORE		0x00000200	/* restore ACL */
 
 #define	WA_OP_SET	(WA_CLONE|WA_STRIP|WA_CHOWN)
 #define	WA_OP_CHECK(flags, bit) ((flags & ~bit) & WA_OP_SET)
@@ -79,7 +80,8 @@ struct {
 } actions[] = {
 	{	"clone",	WA_CLONE	},
 	{	"strip",	WA_STRIP	},
-	{	"chown",	WA_CHOWN	}
+	{	"chown",	WA_CHOWN	},
+	{	"restore",	WA_RESTORE	}
 };
 
 size_t actions_size = sizeof(actions) / sizeof(actions[0]);
@@ -202,16 +204,16 @@ usage(char *path)
 	fprintf(stderr,
 		"Usage: %s [OPTIONS] ...\n"
 		"Where option is:\n"
-		"    -a <clone|strip|chown>       # action to perform\n"
-		"    -O <owner>                   # change owner\n"
-		"    -G <group>                   # change group\n"
-		"    -c <path>                    # chroot path\n"
-		"    -s <source>                  # source (if cloning ACL). If none specified then ACL taken from -p\n"
-		"    -p <path>                    # path to set\n"
-		"    -r                           # recursive\n"
-		"    -v                           # verbose\n"
-		"    -t                           # trial run - makes no changes\n"
-		"    -x                           # traverse filesystem mountpoints\n",
+		"    -a <clone|strip|chown|restore> # action to perform <restore is experimental!>\n"
+		"    -O <owner>                     # change owner\n"
+		"    -G <group>                     # change group\n"
+		"    -c <path>                      # chroot path\n"
+		"    -s <source>                    # source (if cloning ACL). If none specified then ACL taken from -p\n"
+		"    -p <path>                      # path to set\n"
+		"    -r                             # recursive\n"
+		"    -v                             # verbose\n"
+		"    -t                             # trial run - makes no changes\n"
+		"    -x                             # traverse filesystem mountpoints\n",
 		path
 	);
 	}
@@ -327,6 +329,140 @@ strip_acl(struct windows_acl_info *w, FTSENT *fts_entry)
 	return (0);
 }
 
+
+static inline int acl_cmp(acl_t source, acl_t dest, int flags)
+{
+	acl_entry_t s_entry, p_entry;
+	acl_permset_t s_perm, p_perm;
+	acl_tag_t s_tag, p_tag;
+	acl_flagset_t s_flag, p_flag;
+
+	int entry_id = ACL_FIRST_ENTRY;
+	int rv;
+
+	if (source->ats_acl.acl_cnt != dest->ats_acl.acl_cnt) {
+		if (flags & WA_VERBOSE) {
+			fprintf(stdout, "+ [COUNT %d -> %d] ",
+				source->ats_acl.acl_cnt,
+				dest->ats_acl.acl_cnt);
+		}
+		return -1;
+	}
+
+	while (acl_get_entry(source, entry_id, &s_entry) == 1) {
+		entry_id = ACL_NEXT_ENTRY;
+		rv = acl_get_entry(dest, entry_id, &p_entry);
+		if (rv != 1) {
+			if (flags & WA_VERBOSE) {
+				fprintf(stdout, "+ [ACL_ERROR: %s] ",
+					strerror(errno));
+			}
+			return -1;
+		}
+
+		if (s_entry->ae_tag != p_entry->ae_tag) {
+			if (flags & WA_VERBOSE) {
+				fprintf(stdout, "+ [ACL tag 0x%08x -> 0x%08x] ",
+					s_entry->ae_tag, p_entry->ae_tag);
+			}
+			return -1;
+		}
+		if (s_entry->ae_id != p_entry->ae_id) {
+			if (flags & WA_VERBOSE) {
+				fprintf(stdout, "+ [ACL id %d -> %d] ",
+					s_entry->ae_id, p_entry->ae_id);
+			}
+			return -1;
+		}
+		if (s_entry->ae_perm != p_entry->ae_perm) {
+			if (flags & WA_VERBOSE) {
+				fprintf(stdout, "+ [ACL perm 0x%08x -> 0x%08x] ",
+					s_entry->ae_perm, p_entry->ae_perm);
+			}
+			return -1;
+		}
+		if (s_entry->ae_entry_type != p_entry->ae_entry_type) {
+			if (flags & WA_VERBOSE) {
+				fprintf(stdout, "+ [ACL entry_type 0x%08x -> 0x%08x] ",
+					s_entry->ae_entry_type, p_entry->ae_entry_type);
+			}
+			return -1;
+		}
+		if (s_entry->ae_flags != p_entry->ae_flags) {
+			if (flags & WA_VERBOSE) {
+				fprintf(stdout, "+ [ACL entry_flags 0x%08x -> 0x%08x] ",
+					s_entry->ae_flags, p_entry->ae_flags);
+			}
+			return -1;
+		}
+	}
+	return 0;
+}
+
+
+static int
+restore_acl(struct windows_acl_info *w, char *relpath, FTSENT *fts_entry, size_t slen)
+{
+	char *path;
+	acl_t acl_new, acl_old;
+	int rval;
+	char shadow_path[PATH_MAX] = {0};
+
+	if (strlen(relpath) + slen > PATH_MAX) {
+		warn("%s: path in snapshot directory is too long", relpath);
+		return -1;
+	}
+
+	rval = snprintf(shadow_path, sizeof(shadow_path), "%s/%s", w->source, relpath);
+	if (rval < 0) {
+		warn("%s: snprintf failed", relpath);
+		return -1;
+	}
+
+	acl_new = acl_get_file(shadow_path, ACL_TYPE_NFS4);
+	if (acl_new == NULL) {
+		if (errno == ENOENT) {
+			fprintf(stdout, "! %s\n", shadow_path);
+			return 0;
+		}
+		else {
+			warn("%s: acl_get_file() failed", shadow_path);
+			return (-1);
+		}
+	}
+
+	acl_old = acl_get_file(fts_entry->fts_path, ACL_TYPE_NFS4);
+	if (acl_old == NULL) {
+		warn("%s: acl_get_file() failed", fts_entry->fts_path);
+		return (-1);
+	}
+
+	rval = acl_cmp(acl_new, acl_old, w->flags);
+	if (rval == 0) {
+		return 0;
+	}
+
+	if (w->flags & WA_VERBOSE) {
+		fprintf(stdout, "%s -> %s\n",
+			shadow_path,
+			fts_entry->fts_path);
+	}
+	if ((w->flags & WA_TRIAL) == 0) {
+		rval = acl_set_file(fts_entry->fts_accpath,
+				    ACL_TYPE_NFS4, acl_new);
+		if (rval < 0) {
+			warn("%s: acl_set_file() failed", fts_entry->fts_accpath);
+			acl_free(acl_old);
+			acl_free(acl_new);
+			return -1;
+		}
+	}
+
+	acl_free(acl_old);
+	acl_free(acl_new);
+	return 0;
+}
+
 static int
 set_acl(struct windows_acl_info *w, FTSENT *fts_entry)
 {
@@ -377,6 +513,7 @@ fts_compare(const FTSENT * const *s1, const FTSENT * const *s2)
 }
 
 
+
 static int
 set_acls(struct windows_acl_info *w)
 {
@@ -386,6 +523,8 @@ set_acls(struct windows_acl_info *w)
 	char *paths[4];
 	int rval;
 	struct stat ftsroot_st;
+	size_t slen, plen;
+	char *relpath;
 
 	if (w == NULL)
 		return (-1);
@@ -397,12 +536,15 @@ set_acls(struct windows_acl_info *w)
 	paths[0] = w->path;
 	paths[1] = NULL;
 
-	if ((w->flags & WA_TRAVERSE) == 0 ) {
+	if ((w->flags & WA_TRAVERSE) == 0 || (w->flags & WA_RESTORE)) {
 		options |= FTS_XDEV;
 	}
 
 	if ((tree = fts_open(paths, options, fts_compare)) == NULL)
 		err(EX_OSERR, "fts_open");
+
+        slen = strlen(w->source);
+        plen = strlen(w->path);
 
 	/* traverse directory hierarchy */
 	for (rval = 0; (entry = fts_read(tree)) != NULL;) {
@@ -430,6 +572,18 @@ set_acls(struct windows_acl_info *w)
 				if (w->root_dev == entry->fts_statp->st_dev) {
 					warnx("%s: path resides in boot pool", entry->fts_path);
 					return -1;
+				}
+				if (w->flags & WA_RESTORE) {
+					relpath = entry->fts_path + plen;
+					if (relpath[0] == '/') {
+						relpath++;
+					}
+					if (strlen(entry->fts_path) > PATH_MAX) {
+						warnx("%s: PATH TOO LONG", entry->fts_path);
+						return -1;
+					}
+					rval = restore_acl(w, relpath, entry, slen);
+					break;
 				}
 				if (w->flags & WA_TRIAL) {
 					fprintf(stdout, "depth: %ld, name: %s, full_path: %s\n",
@@ -520,7 +674,7 @@ make_acls(struct windows_acl_info *w)
 }
 
 static int
-calculate_inherited_acl(struct windows_acl_info *w, acl_t *parent_acl, int level)
+calculate_inherited_acl(struct windows_acl_info *w, acl_t parent_acl, int level)
 {
 	/*
 	 * Generates an inherited directory ACL and file ACL based
@@ -610,7 +764,7 @@ calculate_inherited_acl(struct windows_acl_info *w, acl_t *parent_acl, int level
 
 		/*
 		 * Add the entries to the file ACL and directory ACL. Since files and directories
-		 * will require differnt flags to be set, we make separate callse to acl_get_flagset_np()
+		 * will require differnt flags to be set, we make separate calls to acl_get_flagset_np()
 		 * to modify the flagset of the new ACEs.
 		 */
 		if (must_set_facl) {
@@ -781,6 +935,10 @@ main(int argc, char **argv)
 
 	/* set the source to the destination if we lack -s */
 	if (w->source == NULL) {
+		if (w->flags & WA_RESTORE) {
+			warn("source must be set for restore jobs");
+			return (1);
+		}
 		w->source = w->path;
 	}
 
