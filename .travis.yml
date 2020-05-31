@@ -1,7 +1,9 @@
 language: python
 python:
     - 3.8
-
+arch:
+    - amd64
+    - arm64
 install:
     - sudo apt-get -qq update
     - sudo apt-get -y install git
